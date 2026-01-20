@@ -11,6 +11,7 @@ import json
 import logging
 import time
 import uuid
+import base64
 from typing import Dict, Any, Optional
 import requests
 from io import BytesIO
@@ -26,10 +27,30 @@ class SumsubService:
     
     def __init__(self):
         self.base_url = settings.SUMSUB_BASE_URL.rstrip('/')  # Ensure no trailing slash
-        self.secret_key = settings.SUMSUB_SECRET_KEY
         self.app_token = settings.SUMSUB_APP_TOKEN
         self.level_name = settings.SUMSUB_LEVEL_NAME
         self.timeout = settings.REQUEST_TIMEOUT
+        
+        # Handle secret key - may be base64 encoded
+        self.secret_key = self._decode_secret_key(settings.SUMSUB_SECRET_KEY)
+    
+    def _decode_secret_key(self, secret_key: str) -> str:
+        """
+        Decode secret key if it's base64 encoded
+        SumSub sometimes provides keys in base64 format
+        """
+        try:
+            # Try to decode as base64
+            decoded = base64.b64decode(secret_key).decode('utf-8')
+            # If successful and different from original, use decoded version
+            if decoded != secret_key:
+                logger.info("✅ Secret key decoded from base64 format")
+                return decoded
+            return secret_key
+        except Exception as e:
+            # If decode fails, assume it's plain text
+            logger.debug(f"Secret key is not base64 encoded (or already plain): {str(e)}")
+            return secret_key
     
     def _sign_request(self, method: str, path_url: str, body: bytes = b'', is_multipart: bool = False) -> Dict[str, str]:
         """Sign request with Sumsub HMAC-SHA256"""
@@ -45,18 +66,28 @@ class SumsubService:
             body
         )
         
+        # Log signature details for debugging
+        logger.debug(f"Signature calculation:")
+        logger.debug(f"  Timestamp: {now}")
+        logger.debug(f"  Method: {method.upper()}")
+        logger.debug(f"  Path: {path_url}")
+        logger.debug(f"  Body length: {len(body)}")
+        logger.debug(f"  Data to sign length: {len(data_to_sign)}")
+        
         signature = hmac.new(
             self.secret_key.encode('utf-8'),
             data_to_sign,
             digestmod=hashlib.sha256
         ).hexdigest()
         
+        logger.debug(f"  Generated signature: {signature[:30]}...")
+        
         headers = {
             'X-App-Token': self.app_token,
             'X-App-Access-Ts': str(now),
             'X-App-Access-Sig': signature,
-            'Accept': 'application/json',  # Recommended by Sumsub
-            'X-Return-Doc-Warnings': 'true',  # Helps get detailed doc issues
+            'Accept': 'application/json',
+            'X-Return-Doc-Warnings': 'true',
         }
         
         if not is_multipart:
@@ -238,38 +269,94 @@ class SumsubService:
         """
         BIO-012: Scan ID - Front
         Add document front side
+        
+        FIX: Sign with ACTUAL multipart body (not empty) following Sumsub official pattern
+        The signature must match the exact bytes being sent, including boundary markers
         """
         try:
             metadata = json.dumps({
                 "idDocType": doc_type,
                 "country": country,
-                "idDocSubType": "FRONT_SIDE"  # Important for accuracy
+                "idDocSubType": "FRONT_SIDE"
             })
             
             path = f'/resources/applicants/{applicant_id}/info/idDoc'
+            full_url = f"{self.base_url}{path}"
+            
+            logger.info(f"🔵 Document Upload - Front Side")
+            logger.info(f"  Applicant ID: {applicant_id}")
+            logger.info(f"  Path: {path}")
+            logger.info(f"  Full URL: {full_url}")
+            logger.info(f"  Document size: {len(document_image_bytes)} bytes")
+            logger.info(f"  Document type: {doc_type}")
+            logger.info(f"  Country: {country}")
+            
+            # Step 1: Prepare multipart request to get ACTUAL body with boundary
             files = {'content': ('front.jpg', BytesIO(document_image_bytes), 'image/jpeg')}
             data = {'metadata': metadata}
             
-            headers = self._sign_request('POST', path, b'', is_multipart=True)
+            req = requests.Request('POST', full_url, files=files, data=data)
+            prepared = req.prepare()
             
-            logger.info(f"Uploading document front to path: {path}")
-            logger.info(f"Document size: {len(document_image_bytes)} bytes")
-            logger.info(f"Document type: {doc_type}, Country: {country}")
+            # Step 2: Sign using ACTUAL prepared body (with boundary)
+            now = int(time.time())
             
-            response = requests.post(
-                f"{self.base_url}{path}",
-                headers=headers,
-                files=files,
-                data=data,
-                timeout=self.timeout
+            # Extract path_url with query params if any
+            path_url = prepared.path_url
+            
+            data_to_sign = (
+                str(now).encode('utf-8') +
+                b'POST' +
+                path_url.encode('utf-8') +
+                prepared.body  # ← THIS is the KEY! actual multipart bytes
             )
             
-            logger.info(f"Document upload response status: {response.status_code}")
-            logger.info(f"Document upload response: {response.text}")
+            signature = hmac.new(
+                self.secret_key.encode('utf-8'),
+                data_to_sign,
+                digestmod=hashlib.sha256
+            ).hexdigest()
+            
+            logger.info(f"  Timestamp: {now}")
+            logger.info(f"  Multipart body size: {len(prepared.body)} bytes")
+            logger.info(f"  X-App-Access-Ts: {now}")
+            logger.info(f"  X-App-Access-Sig: {signature[:30]}...")
+            logger.info(f"  Content-Type: {prepared.headers.get('Content-Type', 'MISSING')[:50]}...")
+            
+            # Step 3: Build headers with signature
+            headers = {
+                'X-App-Token': self.app_token,
+                'X-App-Access-Ts': str(now),
+                'X-App-Access-Sig': signature,
+                'Accept': 'application/json',
+                'X-Return-Doc-Warnings': 'true',
+            }
+            
+            # Step 4: Copy Content-Type from prepared (includes boundary)
+            if 'Content-Type' in prepared.headers:
+                headers['Content-Type'] = prepared.headers['Content-Type']
+            
+            # Step 5: Send using Session with prepared request
+            session = requests.Session()
+            prepared.headers.update(headers)
+            
+            response = session.send(prepared, timeout=self.timeout)
+            
+            logger.info(f"Response Status: {response.status_code}")
+            
+            if response.status_code not in [200, 201]:
+                logger.error(f"Response Headers: {dict(response.headers)}")
+                logger.error(f"Response Body: {response.text}")
+                
+                if response.status_code == 401:
+                    logger.error("⚠️ 401 SIGNATURE MISMATCH")
+                    logger.error(f"   - Verify SUMSUB_SECRET_KEY in .env (should be ~40 chars)")
+                    logger.error(f"   - Check system clock sync: w32tm /resync")
+                    logger.error(f"   - Ensure server restarted after .env changes")
             
             if response.status_code in [200, 201]:
                 image_id = response.headers.get('X-Image-Id', '')
-                logger.info(f"Document front added: {image_id}")
+                logger.info(f"✅ Document front uploaded successfully: {image_id}")
                 return {
                     "success": True,
                     "image_id": image_id,
@@ -278,9 +365,23 @@ class SumsubService:
                     "confidence": 0.92
                 }
             else:
-                error_msg = f"Sumsub API Error: Status {response.status_code} - {response.text}"
-                logger.error(f"Failed to scan document front: {error_msg}")
-                return {"success": False, "error": error_msg, "document_detected": False}
+                error_msg = f"Sumsub API Error: Status {response.status_code}"
+                try:
+                    error_data = response.json()
+                    if 'description' in error_data:
+                        error_msg += f" - {error_data['description']}"
+                    if 'errorCode' in error_data:
+                        error_msg += f" (Code: {error_data['errorCode']})"
+                except:
+                    error_msg += f" - {response.text}"
+                
+                logger.error(f"❌ Failed to scan document front: {error_msg}")
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "document_detected": False,
+                    "status_code": response.status_code
+                }
         except Exception as e:
             error_msg = f"Exception in scan_document_front: {str(e)}"
             logger.error(error_msg, exc_info=True)
@@ -296,6 +397,8 @@ class SumsubService:
         """
         BIO-012: Scan ID - Back
         Add document back side
+        
+        FIX: Sign with ACTUAL multipart body (not empty) following Sumsub official pattern
         """
         try:
             metadata = json.dumps({
@@ -305,26 +408,71 @@ class SumsubService:
             })
             
             path = f'/resources/applicants/{applicant_id}/info/idDoc'
+            full_url = f"{self.base_url}{path}"
+            
+            logger.info(f"Document Upload - Back Side")
+            logger.info(f"  Applicant ID: {applicant_id}")
+            logger.info(f"  Path: {path}")
+            logger.info(f"  Document size: {len(document_image_bytes)} bytes")
+            logger.info(f"  Document type: {doc_type}")
+            logger.info(f"  Country: {country}")
+            
+            # Step 1: Prepare multipart request to get ACTUAL body with boundary
             files = {'content': ('back.jpg', BytesIO(document_image_bytes), 'image/jpeg')}
             data = {'metadata': metadata}
             
-            headers = self._sign_request('POST', path, b'', is_multipart=True)
+            req = requests.Request('POST', full_url, files=files, data=data)
+            prepared = req.prepare()
             
-            logger.info(f"Uploading document back for applicant: {applicant_id}")
+            # Step 2: Sign using ACTUAL prepared body (with boundary)
+            now = int(time.time())
+            path_url = prepared.path_url
             
-            response = requests.post(
-                f"{self.base_url}{path}",
-                headers=headers,
-                files=files,
-                data=data,
-                timeout=self.timeout
+            data_to_sign = (
+                str(now).encode('utf-8') +
+                b'POST' +
+                path_url.encode('utf-8') +
+                prepared.body  # ← ACTUAL multipart bytes
             )
             
-            logger.info(f"Document back upload response: {response.status_code}")
+            signature = hmac.new(
+                self.secret_key.encode('utf-8'),
+                data_to_sign,
+                digestmod=hashlib.sha256
+            ).hexdigest()
+            
+            logger.info(f"  Timestamp: {now}")
+            logger.info(f"  Multipart body size: {len(prepared.body)} bytes")
+            logger.info(f"  X-App-Access-Sig: {signature[:20]}...")
+            
+            # Step 3: Build headers with signature
+            headers = {
+                'X-App-Token': self.app_token,
+                'X-App-Access-Ts': str(now),
+                'X-App-Access-Sig': signature,
+                'Accept': 'application/json',
+                'X-Return-Doc-Warnings': 'true',
+            }
+            
+            # Step 4: Copy Content-Type from prepared (includes boundary)
+            if 'Content-Type' in prepared.headers:
+                headers['Content-Type'] = prepared.headers['Content-Type']
+            
+            # Step 5: Send using Session with prepared request
+            session = requests.Session()
+            prepared.headers.update(headers)
+            
+            response = session.send(prepared, timeout=self.timeout)
+            
+            logger.info(f"Response Status: {response.status_code}")
+            
+            if response.status_code not in [200, 201]:
+                logger.error(f"Response Headers: {dict(response.headers)}")
+                logger.error(f"Response Body: {response.text}")
             
             if response.status_code in [200, 201]:
                 image_id = response.headers.get('X-Image-Id', '')
-                logger.info(f"Document back added: {image_id}")
+                logger.info(f"✅ Document back uploaded successfully: {image_id}")
                 return {
                     "success": True,
                     "image_id": image_id,
@@ -332,12 +480,27 @@ class SumsubService:
                     "confidence": 0.90
                 }
             else:
-                error_msg = f"Sumsub API Error: Status {response.status_code} - {response.text}"
-                logger.error(f"Failed to scan document back: {error_msg}")
-                return {"success": False, "error": error_msg, "document_detected": False}
+                error_msg = f"Sumsub API Error: Status {response.status_code}"
+                try:
+                    error_data = response.json()
+                    if 'description' in error_data:
+                        error_msg += f" - {error_data['description']}"
+                    if 'errorCode' in error_data:
+                        error_msg += f" (Code: {error_data['errorCode']})"
+                except:
+                    error_msg += f" - {response.text}"
+                
+                logger.error(f"❌ Failed to scan document back: {error_msg}")
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "document_detected": False,
+                    "status_code": response.status_code
+                }
         except Exception as e:
-            logger.error(f"Exception in scan_document_back: {str(e)}", exc_info=True)
-            return {"success": False, "error": str(e), "document_detected": False}
+            error_msg = f"Exception in scan_document_back: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return {"success": False, "error": error_msg, "document_detected": False}
     
     async def verify_kyc_selfie(
         self,

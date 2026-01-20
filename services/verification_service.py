@@ -10,7 +10,7 @@ from services.sumsub_service import SumsubService
 from models.schemas import VerificationStatus
 from datetime import datetime
 import logging
-from typing import Optional
+from typing import Optional, Union
 import uuid
 import base64
 
@@ -173,37 +173,39 @@ class VerificationService:
     async def scan_document_front(
         self,
         kyc_session_id: str,
-        image_base64: str,
+        image: Union[bytes, bytearray, str],
         doc_type: str = "PASSPORT",
         country: str = "USA"
     ) -> dict:
-        """BIO-012: Scan ID - Front"""
+        """BIO-012: Scan ID - Front (accepts bytes or base64)"""
         try:
             session = await self.kyc_sessions.find_one({"kyc_session_id": kyc_session_id})
             if not session:
                 return {"success": False, "error": "KYC session not found"}
-            
-            applicant_id = kyc_session_id
-            
-            # Decode base64 with proper padding
+
+            # Normalize payload to bytes
             try:
-                # Add padding if needed
-                missing_padding = len(image_base64) % 4
-                if missing_padding:
-                    image_base64 += '=' * (4 - missing_padding)
-                image_bytes = base64.b64decode(image_base64)
-                logger.info(f"Successfully decoded image: {len(image_bytes)} bytes")
+                if isinstance(image, str):
+                    missing_padding = len(image) % 4
+                    if missing_padding:
+                        image += "=" * (4 - missing_padding)
+                    image_bytes = base64.b64decode(image)
+                elif isinstance(image, (bytes, bytearray)):
+                    image_bytes = bytes(image)
+                else:
+                    return {"success": False, "error": "Invalid image payload"}
             except Exception as decode_error:
                 logger.error(f"Base64 decode error: {str(decode_error)}")
-                return {"success": False, "error": f"Invalid base64 image: {str(decode_error)}"}
-            
+                return {"success": False, "error": f"Invalid image data: {str(decode_error)}"}
+
+            applicant_id = kyc_session_id
             result = await self.sumsub.scan_document_front(
-                applicant_id, 
-                image_bytes, 
-                doc_type, 
+                applicant_id,
+                image_bytes,
+                doc_type,
                 country
             )
-            
+
             if result.get("success"):
                 await self.kyc_sessions.update_one(
                     {"kyc_session_id": kyc_session_id},
@@ -215,60 +217,12 @@ class VerificationService:
                     },
                     "$push": {"steps_completed": "document_front"}}
                 )
-            
+
             return result
         except Exception as e:
             logger.error(f"Scan document front error: {str(e)}", exc_info=True)
             raise
     
-    async def scan_document_back(
-        self,
-        kyc_session_id: str,
-        image_base64: str,
-        doc_type: str = "PASSPORT",
-        country: str = "USA"
-    ) -> dict:
-        """BIO-012: Scan ID - Back"""
-        try:
-            session = await self.kyc_sessions.find_one({"kyc_session_id": kyc_session_id})
-            if not session:
-                return {"success": False, "error": "KYC session not found"}
-            
-            applicant_id = kyc_session_id
-            
-            # Decode base64 with proper padding
-            try:
-                # Add padding if needed
-                missing_padding = len(image_base64) % 4
-                if missing_padding:
-                    image_base64 += '=' * (4 - missing_padding)
-                image_bytes = base64.b64decode(image_base64)
-                logger.info(f"Successfully decoded image: {len(image_bytes)} bytes")
-            except Exception as decode_error:
-                logger.error(f"Base64 decode error: {str(decode_error)}")
-                return {"success": False, "error": f"Invalid base64 image: {str(decode_error)}"}
-            
-            result = await self.sumsub.scan_document_back(
-                applicant_id, 
-                image_bytes, 
-                doc_type, 
-                country
-            )
-            
-            if result.get("success"):
-                await self.kyc_sessions.update_one(
-                    {"kyc_session_id": kyc_session_id},
-                    {"$set": {
-                        "document_back_added": True,
-                        "updated_at": datetime.utcnow()
-                    },
-                    "$push": {"steps_completed": "document_back"}}
-                )
-            
-            return result
-        except Exception as e:
-            logger.error(f"Scan document back error: {str(e)}")
-            raise
     
     async def verify_kyc_selfie(
         self,
@@ -313,25 +267,19 @@ class VerificationService:
             raise
     
     async def check_kyc_verification_status(self, kyc_session_id: str) -> dict:
-        """BIO-014: Verification in Progress - Check status"""
+        """BIO-014: Verification in Progress"""
         try:
             session = await self.kyc_sessions.find_one({"kyc_session_id": kyc_session_id})
             if not session:
                 return {"success": False, "error": "KYC session not found"}
             
-            applicant_id = kyc_session_id
-            result = await self.sumsub.check_kyc_status(applicant_id)
-            
+            result = await self.sumsub.check_kyc_status(kyc_session_id)
             return result
         except Exception as e:
             logger.error(f"Check KYC status error: {str(e)}")
             raise
     
-    async def complete_kyc_verification(
-        self,
-        kyc_session_id: str,
-        user_id: str
-    ) -> dict:
+    async def complete_kyc_verification(self, kyc_session_id: str, user_id: str) -> dict:
         """BIO-015: KYC Approved - Complete verification"""
         try:
             session = await self.kyc_sessions.find_one({"kyc_session_id": kyc_session_id})
@@ -348,7 +296,8 @@ class VerificationService:
                         "status": "completed",
                         "verified": True,
                         "updated_at": datetime.utcnow()
-                    }}
+                    },
+                    "$push": {"steps_completed": "kyc_complete"}}
                 )
                 
                 # Update user
@@ -366,6 +315,58 @@ class VerificationService:
             return result
         except Exception as e:
             logger.error(f"Complete KYC error: {str(e)}")
+            raise
+    
+    async def scan_document_back(
+        self,
+        kyc_session_id: str,
+        image: Union[bytes, bytearray, str],
+        doc_type: str = "PASSPORT",
+        country: str = "USA"
+    ) -> dict:
+        """BIO-012: Scan ID - Back (accepts bytes or base64)"""
+        try:
+            session = await self.kyc_sessions.find_one({"kyc_session_id": kyc_session_id})
+            if not session:
+                return {"success": False, "error": "KYC session not found"}
+
+            try:
+                if isinstance(image, str):
+                    missing_padding = len(image) % 4
+                    if missing_padding:
+                        image += "=" * (4 - missing_padding)
+                    image_bytes = base64.b64decode(image)
+                elif isinstance(image, (bytes, bytearray)):
+                    image_bytes = bytes(image)
+                else:
+                    return {"success": False, "error": "Invalid image payload"}
+            except Exception as decode_error:
+                logger.error(f"Base64 decode error: {str(decode_error)}")
+                return {"success": False, "error": f"Invalid image data: {str(decode_error)}"}
+
+            applicant_id = kyc_session_id
+            result = await self.sumsub.scan_document_back(
+                applicant_id,
+                image_bytes,
+                doc_type,
+                country
+            )
+
+            if result.get("success"):
+                await self.kyc_sessions.update_one(
+                    {"kyc_session_id": kyc_session_id},
+                    {"$set": {
+                        "document_back_added": True,
+                        "document_type": doc_type,
+                        "country": country,
+                        "updated_at": datetime.utcnow()
+                    },
+                    "$push": {"steps_completed": "document_back"}}
+                )
+
+            return result
+        except Exception as e:
+            logger.error(f"Scan document back error: {str(e)}")
             raise
     
     async def get_user_verification_status(self, user_id: str) -> dict:

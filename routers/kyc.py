@@ -51,9 +51,11 @@ class StartKYCResponse(BaseModel):
     kyc_session_id: str
     status: str
 
+
+from fastapi import File, UploadFile, Form
+
 class ScanDocumentRequest(BaseModel):
     kyc_session_id: str
-    image_base64: str
     doc_type: str = "PASSPORT"
     country: str = "USA"
 
@@ -104,24 +106,27 @@ async def start_kyc(
         raise HTTPException(status_code=500, detail="Failed")
 
 # BIO-012 Front
+
 @router.post("/document/scan-front", response_model=ScanDocumentResponse)
 async def scan_document_front(
-    request: ScanDocumentRequest,
+    kyc_session_id: str = Form(...),
+    doc_type: str = Form("PASSPORT"),
+    country: str = Form("USA"),
+    image_file: UploadFile = File(...),
     api_key: str = Depends(verify_api_key)
 ):
-    """BIO-012: Scan ID - Front"""
+    """BIO-012: Scan ID - Front (Direct image upload)"""
     try:
+        image_bytes = await image_file.read()
         service = VerificationService()
         result = await service.scan_document_front(
-            request.kyc_session_id,
-            request.image_base64,
-            request.doc_type,
-            request.country
+            kyc_session_id,
+            image_bytes,
+            doc_type,
+            country
         )
-        
         if not result.get("success"):
             raise HTTPException(status_code=400, detail=result.get("error"))
-        
         return ScanDocumentResponse(
             image_id=result["image_id"],
             document_detected=result.get("document_detected", False),
