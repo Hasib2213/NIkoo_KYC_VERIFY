@@ -1,0 +1,168 @@
+# app/routers/liveness.py
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
+from typing import Optional
+from services.verification_service import VerificationService
+from utils.auth import verify_api_key
+import logging
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/v1/liveness", tags=["Face Liveness Detection"])
+
+# Request/Response Models
+class StartLivenessRequest(BaseModel):
+    user_id: str
+    metadata: Optional[dict] = None
+
+class StartLivenessResponse(BaseModel):
+    session_id: str
+    status: str
+    message: str = "Liveness detection session started"
+
+class ProcessLivenessRequest(BaseModel):
+    session_id: str
+    image_base64: str
+    check_type: str = "orientation"  # orientation, blink, etc
+
+class ProcessLivenessResponse(BaseModel):
+    is_live: bool
+    confidence: float
+    checks_passed: dict
+    face_detected: bool
+    message: str
+
+class CompleteLivenessRequest(BaseModel):
+    session_id: str
+    user_id: str
+    is_live: bool
+
+class CompleteLivenessResponse(BaseModel):
+    message: str
+    status: str
+    liveness_id: str
+
+# BIO-008: Start Face Liveness Detection
+@router.post("/start", response_model=StartLivenessResponse)
+async def start_liveness_detection(
+    request: StartLivenessRequest,
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    BIO-008: Initiate face liveness detection
+    Returns session_id for next steps
+    """
+    try:
+        service = VerificationService()
+        result = await service.start_liveness_detection(request.user_id)
+        
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=result.get("error", "Failed to start liveness detection")
+            )
+        
+        return StartLivenessResponse(
+            session_id=result["session_id"],
+            status=result["status"]
+        )
+    except Exception as e:
+        logger.error(f"Start liveness error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to start liveness detection"
+        )
+
+# BIO-009: Process Face Liveness Check
+@router.post("/check", response_model=ProcessLivenessResponse)
+async def process_liveness_check(
+    request: ProcessLivenessRequest,
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    BIO-009: Process face liveness check
+    Supports: Look left, Blink, Look right
+    """
+    try:
+        service = VerificationService()
+        result = await service.process_liveness_check(
+            request.session_id,
+            request.image_base64
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=result.get("error", "Liveness check failed")
+            )
+        
+        return ProcessLivenessResponse(
+            is_live=result.get("is_live", False),
+            confidence=result.get("confidence", 0),
+            checks_passed=result.get("checks_passed", {}),
+            face_detected=result.get("face_detected", False),
+            message="Liveness check completed"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Liveness check error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Liveness check failed"
+        )
+
+# BIO-010: Complete Liveness Enrollment
+@router.post("/complete", response_model=CompleteLivenessResponse)
+async def complete_liveness_enrollment(
+    request: CompleteLivenessRequest,
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    BIO-010: Complete liveness enrollment
+    Returns: "Liveness Enrolled Successfully"
+    """
+    try:
+        service = VerificationService()
+        result = await service.complete_liveness_verification(
+            request.session_id,
+            request.user_id,
+            request.is_live
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=result.get("error", "Failed to complete liveness")
+            )
+        
+        return CompleteLivenessResponse(
+            message=result.get("message", "Liveness Enrolled Successfully"),
+            status=result.get("status", "completed"),
+            liveness_id=request.session_id
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Complete liveness error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to complete liveness enrollment"
+        )
+
+# Get Liveness Status
+@router.get("/status/{user_id}")
+async def get_liveness_status(
+    user_id: str,
+    api_key: str = Depends(verify_api_key)
+):
+    """Get user's liveness verification status"""
+    try:
+        service = VerificationService()
+        status_data = await service.get_user_verification_status(user_id)
+        return status_data
+    except Exception as e:
+        logger.error(f"Get liveness status error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get liveness status"
+        )

@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-dotenv
+pymongo
+motor
+pydantic
+pydantic-settings
+requests
+Pillow
+python-multipart
+aiofiles
+httpx
+python-jose
+passlib
