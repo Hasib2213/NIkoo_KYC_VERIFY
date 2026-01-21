@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     SUMSUB_SECRET_KEY: str = ""
     SUMSUB_APP_TOKEN: str = ""
     SUMSUB_LEVEL_NAME: str = "basic-kyc-level"
+    SUMSUB_WEBHOOK_SECRET: str = ""
     SUMSUB_BASE_URL: str = "https://api.sandbox.sumsub.com"
     SUMSUB_LIVENESS_ENDPOINT: str = "/v1/liveness/verify"
     SUMSUB_DOCUMENT_ENDPOINT: str = "/v1/document/verify"

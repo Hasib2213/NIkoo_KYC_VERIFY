@@ -29,33 +29,54 @@ class WebhookPayload(BaseModel):
     verificationResult: Optional[Dict[str, Any]] = None
 
 
-def verify_webhook_signature(body: bytes, signature: str) -> bool:
+def verify_webhook_signature(body: bytes, headers: dict) -> bool:
     """
-    Verify SumSub webhook signature using HMAC-SHA256
-    SumSub sends: X-Webhook-Signature header with signature
+    Sumsub webhook signature verification - FINAL VERSION
+    Header: X-Payload-Digest
+    Algorithm: X-Payload-Digest-Alg (default HMAC_SHA256_HEX)
     """
     try:
+        signature = headers.get("x-payload-digest", "")
+        alg_header = headers.get("x-payload-digest-alg", "HMAC_SHA256_HEX").upper()
+        
         if not signature:
-            logger.warning("Missing signature header")
+            logger.warning("Missing X-Payload-Digest header")
             return False
         
-        secret_key = str(settings.SUMSUB_SECRET_KEY).strip()
-        if not secret_key or secret_key == "":
-            logger.error("SUMSUB_SECRET_KEY not configured. Check .env file and restart the server.")
+        secret_key = str(settings.SUMSUB_WEBHOOK_SECRET).strip()
+        if not secret_key:
+            logger.error("SUMSUB_WEBHOOK_SECRET not set in .env")
             return False
         
-        # Calculate expected signature
-        expected_signature = hmac.new(
+        # Algorithm mapping (Sumsub supports these)
+        alg_map = {
+            "HMAC_SHA256_HEX": hashlib.sha256,
+            "HMAC_SHA512_HEX": hashlib.sha512,
+            "HMAC_SHA1_HEX": hashlib.sha1,  # deprecated but supported
+        }
+        
+        hash_func = alg_map.get(alg_header)
+        if not hash_func:
+            logger.error(f"Unsupported algorithm: {alg_header}")
+            return False
+        
+        # Compute HMAC on RAW body bytes
+        expected_sig = hmac.new(
             secret_key.encode('utf-8'),
-            body,
-            hashlib.sha256
-        ).hexdigest()
+            body,                    # raw bytes - do not decode!
+            hash_func
+        ).hexdigest()                # lowercase hex
         
-        # Compare signatures
-        is_valid = hmac.compare_digest(signature, expected_signature)
+        is_valid = hmac.compare_digest(expected_sig, signature)
         
         if not is_valid:
-            logger.warning(f"Signature mismatch. Received: {signature}, Expected: {expected_signature}")
+            logger.warning(
+                f"Signature mismatch!\n"
+                f"Received: {signature[:20]}...\n"
+                f"Expected: {expected_sig[:20]}...\n"
+                f"Alg: {alg_header}\n"
+                f"Secret used (first 5): {secret_key[:5]}..."
+            )
         
         return is_valid
     except Exception as e:
@@ -77,9 +98,14 @@ async def sumsub_webhook(request: Request):
         # Get raw body for signature verification
         body = await request.body()
         
+        # Convert headers to dict for verification
+        headers_dict = dict(request.headers)
+        
+        # Debug: log headers (remove this after testing)
+        logger.info(f"Received webhook headers: {headers_dict}")
+        
         # Verify webhook signature
-        signature = request.headers.get("X-Webhook-Signature", "")
-        if not verify_webhook_signature(body, signature):
+        if not verify_webhook_signature(body, headers_dict):
             logger.warning("Webhook signature verification failed")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
