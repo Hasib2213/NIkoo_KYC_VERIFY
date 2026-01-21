@@ -58,6 +58,7 @@ class ScanDocumentRequest(BaseModel):
     kyc_session_id: str
     doc_type: str = "PASSPORT"
     country: str = "USA"
+    image_base64: Optional[str] = None
 
 class ScanDocumentResponse(BaseModel):
     image_id: str
@@ -66,7 +67,7 @@ class ScanDocumentResponse(BaseModel):
 
 class VerifySelfieRequest(BaseModel):
     kyc_session_id: str
-    image_base64: str
+    image_base64: Optional[str] = None
 
 class VerifySelfieResponse(BaseModel):
     image_id: str
@@ -139,17 +140,26 @@ async def scan_document_front(
 # BIO-012 Back
 @router.post("/document/scan-back", response_model=ScanDocumentResponse)
 async def scan_document_back(
-    request: ScanDocumentRequest,
+    kyc_session_id: str = Form(...),
+    doc_type: str = Form("PASSPORT"),
+    country: str = Form("USA"),
+    image_file: UploadFile = File(None),
+    image_base64: str = Form(None),
     api_key: str = Depends(verify_api_key)
 ):
     """BIO-012: Scan ID - Back"""
     try:
+        if not image_file and not image_base64:
+            raise HTTPException(status_code=400, detail="image_file or image_base64 is required")
+
+        image_payload = await image_file.read() if image_file else image_base64
+
         service = VerificationService()
         result = await service.scan_document_back(
-            request.kyc_session_id,
-            request.image_base64,
-            request.doc_type,
-            request.country
+            kyc_session_id,
+            image_payload,
+            doc_type,
+            country
         )
         
         if not result.get("success"):
@@ -167,15 +177,26 @@ async def scan_document_back(
 # BIO-013
 @router.post("/selfie/verify", response_model=VerifySelfieResponse)
 async def verify_selfie(
-    request: VerifySelfieRequest,
+    kyc_session_id: str = Form(...),
+    image_file: UploadFile = File(None),
+    image_base64: str = Form(None),
     api_key: str = Depends(verify_api_key)
 ):
     """BIO-013: Take a Selfie"""
     try:
+        logger.info(f"verify_selfie called with kyc_session_id: {kyc_session_id}")
+        logger.info(f"image_file: {image_file}, image_base64 length: {len(image_base64) if image_base64 else 0}")
+        
+        if not image_file and not image_base64:
+            raise HTTPException(status_code=400, detail="image_file or image_base64 is required")
+
+        image_payload = await image_file.read() if image_file else image_base64
+        logger.info(f"image_payload type: {type(image_payload)}, size: {len(image_payload) if isinstance(image_payload, bytes) else len(image_payload) if isinstance(image_payload, str) else 'unknown'}")
+
         service = VerificationService()
         result = await service.verify_kyc_selfie(
-            request.kyc_session_id,
-            request.image_base64
+            kyc_session_id,
+            image_payload
         )
         
         if not result.get("success"):

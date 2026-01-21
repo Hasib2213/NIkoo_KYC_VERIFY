@@ -243,9 +243,22 @@ class SumsubService:
                 timeout=self.timeout
             )
             
+            logger.info(f"Sumsub create applicant response status: {response.status_code}")
+            logger.info(f"Response headers: {dict(response.headers)}")
+            logger.info(f"Response text: {response.text[:500]}")  # First 500 chars
+            
             if response.status_code == 201:
                 data = response.json()
-                logger.info(f"KYC applicant created: {data['id']}")
+                logger.info(f"✅ KYC applicant created successfully")
+                logger.info(f"Full response: {json.dumps(data, indent=2)}")
+                logger.info(f"Sumsub applicant ID (data['id']): {data.get('id', 'NOT_FOUND')}")
+                logger.info(f"ID type: {type(data.get('id'))}")
+                logger.info(f"External user ID: {external_user_id}")
+                
+                if 'id' not in data:
+                    logger.error("CRITICAL: Sumsub response missing 'id' field!")
+                    return {"success": False, "error": "Sumsub response missing applicant ID"}
+                
                 return {
                     "success": True,
                     "kyc_session_id": data['id'],
@@ -510,22 +523,89 @@ class SumsubService:
         """
         BIO-013: Take a Selfie
         Add selfie and match with document
+        
+        FIX: Sign with ACTUAL multipart body (not empty) following Sumsub official pattern
+        Uses same endpoint as document upload with idDocType: SELFIE
         """
         try:
-            path = f'/resources/applicants/{applicant_id}/info/selfie'
-            files = {'content': ('selfie.jpg', BytesIO(selfie_image_bytes), 'image/jpeg')}
-            headers_base = self._sign_request('POST', path, b'')
+            # Metadata for SELFIE type (mandatory)
+            metadata = json.dumps({
+                "idDocType": "SELFIE",
+                "country": "DEU"  # Optional but recommended
+            })
             
-            response = requests.post(
-                f"{self.base_url}{path}",
-                headers=headers_base,
-                files=files,
-                timeout=self.timeout
+            path = f'/resources/applicants/{applicant_id}/info/idDoc'
+            full_url = f"{self.base_url}{path}"
+            
+            logger.info(f"Selfie Upload for KYC")
+            logger.info(f"  Applicant ID: {applicant_id}")
+            logger.info(f"  Path: {path}")
+            logger.info(f"  Full URL: {full_url}")
+            logger.info(f"  Selfie size: {len(selfie_image_bytes)} bytes")
+            
+            # Step 1: Prepare multipart request to get ACTUAL body with boundary
+            files = {'content': ('selfie.jpg', BytesIO(selfie_image_bytes), 'image/jpeg')}
+            data = {'metadata': metadata}
+            
+            req = requests.Request('POST', full_url, files=files, data=data)
+            prepared = req.prepare()
+            
+            # Step 2: Sign using ACTUAL prepared body (with boundary)
+            now = int(time.time())
+            path_url = prepared.path_url
+            
+            data_to_sign = (
+                str(now).encode('utf-8') +
+                b'POST' +
+                path_url.encode('utf-8') +
+                prepared.body  # ACTUAL multipart bytes including boundary
             )
             
+            signature = hmac.new(
+                self.secret_key.encode('utf-8'),
+                data_to_sign,
+                digestmod=hashlib.sha256
+            ).hexdigest()
+            
+            logger.info(f"  Timestamp: {now}")
+            logger.info(f"  Multipart body size: {len(prepared.body)} bytes")
+            logger.info(f"  X-App-Access-Sig: {signature[:30]}...")
+            
+            # Step 3: Build headers with signature
+            headers = {
+                'X-App-Token': self.app_token,
+                'X-App-Access-Ts': str(now),
+                'X-App-Access-Sig': signature,
+                'Accept': 'application/json',
+                'X-Return-Doc-Warnings': 'true',
+            }
+            
+            # Step 4: Copy Content-Type from prepared (includes boundary)
+            if 'Content-Type' in prepared.headers:
+                headers['Content-Type'] = prepared.headers['Content-Type']
+            
+            # Step 5: Send using Session with prepared request
+            session = requests.Session()
+            prepared.headers.update(headers)
+            
+            response = session.send(prepared, timeout=self.timeout)
+            
+            logger.info(f"Response Status: {response.status_code}")
+            
+            if response.status_code not in [200, 201]:
+                logger.error(f"Response Headers: {dict(response.headers)}")
+                logger.error(f"Response Body: {response.text}")
+                
+                if response.status_code == 401:
+                    logger.error("⚠️ 401 SIGNATURE MISMATCH")
+                    logger.error(f"   - Verify SUMSUB_SECRET_KEY in .env")
+                    logger.error(f"   - Check system clock sync: w32tm /resync")
+                elif response.status_code == 404:
+                    logger.error("⚠️ 404 NOT FOUND - Check applicant_id exists")
+            
             if response.status_code in [200, 201]:
-                image_id = response.headers.get('X-Image-Id', '')
-                logger.info(f"KYC selfie added: {image_id}")
+                image_id = response.headers.get('X-Image-Id', '') or response.json().get('id', '')
+                logger.info(f"✅ KYC selfie added successfully: {image_id}")
                 return {
                     "success": True,
                     "image_id": image_id,
@@ -535,11 +615,27 @@ class SumsubService:
                     "confidence": 0.93
                 }
             else:
-                logger.error(f"Failed to add KYC selfie: {response.text}")
-                return {"success": False, "error": response.text, "matches_document": False}
+                error_msg = f"Sumsub API Error: Status {response.status_code}"
+                try:
+                    error_data = response.json()
+                    if 'description' in error_data:
+                        error_msg += f" - {error_data['description']}"
+                    if 'errorCode' in error_data:
+                        error_msg += f" (Code: {error_data['errorCode']})"
+                except:
+                    error_msg += f" - {response.text}"
+                
+                logger.error(f"❌ Failed to add KYC selfie: {error_msg}")
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "matches_document": False,
+                    "status_code": response.status_code
+                }
         except Exception as e:
-            logger.error(f"Exception in verify_kyc_selfie: {str(e)}")
-            return {"success": False, "error": str(e), "matches_document": False}
+            error_msg = f"Exception in verify_kyc_selfie: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return {"success": False, "error": error_msg, "matches_document": False}
     
     async def check_kyc_status(self, applicant_id: str) -> Dict[str, Any]:
         """

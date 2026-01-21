@@ -144,11 +144,18 @@ class VerificationService:
     async def start_kyc_verification(self, user_id: str) -> dict:
         """BIO-011: Start KYC Verification"""
         try:
+            logger.info(f"Starting KYC verification for user_id: {user_id}")
             result = await self.sumsub.create_kyc_applicant(user_id)
+            logger.info(f"Sumsub result: {result}")
             
             if result.get("success"):
+                kyc_session_id_from_sumsub = result["kyc_session_id"]
+                logger.info(f"✅ Sumsub applicant created successfully")
+                logger.info(f"   Sumsub applicant ID: {kyc_session_id_from_sumsub}")
+                logger.info(f"   IMPORTANT: Use this ID for all future requests: {kyc_session_id_from_sumsub}")
+                
                 session_doc = {
-                    "kyc_session_id": result["kyc_session_id"],
+                    "kyc_session_id": kyc_session_id_from_sumsub,
                     "user_id": user_id,
                     "external_user_id": result["external_user_id"],
                     "verification_type": "kyc",
@@ -158,10 +165,11 @@ class VerificationService:
                     "updated_at": datetime.utcnow()
                 }
                 await self.kyc_sessions.insert_one(session_doc)
+                logger.info(f"Session stored in MongoDB")
                 
                 return {
                     "success": True,
-                    "kyc_session_id": result["kyc_session_id"],
+                    "kyc_session_id": kyc_session_id_from_sumsub,
                     "status": "initiated"
                 }
             
@@ -198,6 +206,7 @@ class VerificationService:
                 logger.error(f"Base64 decode error: {str(decode_error)}")
                 return {"success": False, "error": f"Invalid image data: {str(decode_error)}"}
 
+            # Use kyc_session_id as applicant_id (Sumsub-assigned ID from data['id'])
             applicant_id = kyc_session_id
             result = await self.sumsub.scan_document_front(
                 applicant_id,
@@ -227,27 +236,42 @@ class VerificationService:
     async def verify_kyc_selfie(
         self,
         kyc_session_id: str,
-        image_base64: str
+        image: Union[bytes, bytearray, str]
     ) -> dict:
         """BIO-013: Take a Selfie and match with document"""
         try:
             session = await self.kyc_sessions.find_one({"kyc_session_id": kyc_session_id})
             if not session:
+                logger.error(f"KYC session not found for kyc_session_id: {kyc_session_id}")
                 return {"success": False, "error": "KYC session not found"}
             
-            applicant_id = kyc_session_id
+            logger.info(f"KYC session found: {session}")
+            logger.info(f"Session keys: {session.keys()}")
+            logger.info(f"kyc_session_id from request: {kyc_session_id}")
+            logger.info(f"kyc_session_id in DB: {session.get('kyc_session_id')}")
             
-            # Decode base64 with proper padding
+            # The applicant_id parameter passed to us IS the Sumsub applicant ID
+            # Use it directly (the kyc_session_id from request is what Sumsub returned)
+            applicant_id = kyc_session_id
+            logger.info(f"Using applicant_id (Sumsub ID): {applicant_id}")
+
             try:
-                missing_padding = len(image_base64) % 4
-                if missing_padding:
-                    image_base64 += '=' * (4 - missing_padding)
-                image_bytes = base64.b64decode(image_base64)
+                if isinstance(image, str):
+                    missing_padding = len(image) % 4
+                    if missing_padding:
+                        image += '=' * (4 - missing_padding)
+                    image_bytes = base64.b64decode(image)
+                elif isinstance(image, (bytes, bytearray)):
+                    image_bytes = bytes(image)
+                else:
+                    return {"success": False, "error": "Invalid image payload"}
             except Exception as decode_error:
                 logger.error(f"Base64 decode error: {str(decode_error)}")
-                return {"success": False, "error": f"Invalid base64 image: {str(decode_error)}"}
-            
+                return {"success": False, "error": f"Invalid image data: {str(decode_error)}"}
+
+            logger.info(f"Calling sumsub.verify_kyc_selfie with applicant_id: {applicant_id}, image size: {len(image_bytes)}")
             result = await self.sumsub.verify_kyc_selfie(applicant_id, image_bytes)
+            logger.info(f"Sumsub result: {result}")
             
             if result.get("success"):
                 await self.kyc_sessions.update_one(
@@ -286,6 +310,7 @@ class VerificationService:
             if not session:
                 return {"success": False, "error": "KYC session not found"}
             
+            # Use kyc_session_id as applicant_id (Sumsub-assigned ID from data['id'])
             applicant_id = kyc_session_id
             result = await self.sumsub.complete_kyc_verification(applicant_id)
             
@@ -344,6 +369,7 @@ class VerificationService:
                 logger.error(f"Base64 decode error: {str(decode_error)}")
                 return {"success": False, "error": f"Invalid image data: {str(decode_error)}"}
 
+            # Use kyc_session_id as applicant_id (Sumsub-assigned ID from data['id'])
             applicant_id = kyc_session_id
             result = await self.sumsub.scan_document_back(
                 applicant_id,
