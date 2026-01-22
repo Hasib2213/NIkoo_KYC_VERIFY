@@ -157,36 +157,171 @@ class SumsubService:
         selfie_image_bytes: bytes
     ) -> Dict[str, Any]:
         """
-        BIO-009: Process Face Liveness Check
-        Add selfie for liveness detection (Look left, Blink, Look right)
+        BIO-009: Process Face Liveness Check with Active Liveness Verification
+        Upload selfie for liveness detection using /info/idDoc endpoint (not /info/selfie)
+        Sumsub automatically performs advanced face liveness check (look left, blink, look right)
+        when using idDocType: "SELFIE" per official API docs
         """
         try:
-            path = f'/resources/applicants/{applicant_id}/info/selfie'
+            # Per Sumsub official API: use /info/idDoc endpoint with metadata idDocType: "SELFIE"
+            metadata = json.dumps({
+                "idDocType": "SELFIE",
+                "country": "BGD"  # Bangladesh (adjust if needed per user locale)
+            })
+            
+            path = f'/resources/applicants/{applicant_id}/info/idDoc'
+            full_url = f"{self.base_url}{path}"
+
+            logger.info("Uploading liveness selfie to correct Sumsub endpoint for active liveness")
+            logger.info(f"  Applicant ID: {applicant_id}")
+            logger.info(f"  Path: {path}")
+            logger.info(f"  Full URL: {full_url}")
+            logger.info(f"  Selfie size: {len(selfie_image_bytes)} bytes")
+            logger.info(f"  Metadata: {metadata}")
+
+            # Prepare multipart request with metadata (required for SELFIE type)
             files = {'content': ('selfie.jpg', BytesIO(selfie_image_bytes), 'image/jpeg')}
-            headers_base = self._sign_request('POST', path, b'')
+            data = {'metadata': metadata}
             
-            response = requests.post(
-                f"{self.base_url}{path}",
-                headers=headers_base,
-                files=files,
-                timeout=self.timeout
+            req = requests.Request('POST', full_url, files=files, data=data)
+            prepared = req.prepare()
+
+            # Sign using actual prepared multipart body (includes boundary)
+            now = int(time.time())
+            path_url = prepared.path_url
+            data_to_sign = (
+                str(now).encode('utf-8') +
+                b'POST' +
+                path_url.encode('utf-8') +
+                prepared.body
             )
+            signature = hmac.new(
+                self.secret_key.encode('utf-8'),
+                data_to_sign,
+                digestmod=hashlib.sha256
+            ).hexdigest()
+
+            logger.info(f"  Timestamp: {now}")
+            logger.info(f"  Multipart body size: {len(prepared.body)} bytes")
+            logger.info(f"  X-App-Access-Sig: {signature[:30]}...")
+
+            headers = {
+                'X-App-Token': self.app_token,
+                'X-App-Access-Ts': str(now),
+                'X-App-Access-Sig': signature,
+                'Accept': 'application/json',
+                'X-Return-Doc-Warnings': 'true',
+            }
+            # Copy Content-Type (with boundary) from prepared
+            if 'Content-Type' in prepared.headers:
+                headers['Content-Type'] = prepared.headers['Content-Type']
+
+            session = requests.Session()
+            prepared.headers.update(headers)
+            response = session.send(prepared, timeout=self.timeout)
+
+            logger.info(f"Response Status: {response.status_code}")
             
+            if response.status_code not in [200, 201]:
+                logger.error(f"Response Headers: {dict(response.headers)}")
+                logger.error(f"Response Body: {response.text}")
+                
+                if response.status_code == 401:
+                    logger.error("⚠️ 401 SIGNATURE MISMATCH")
+                    logger.error("   Verify SUMSUB_SECRET_KEY in .env")
+                    logger.error("   Check system clock sync: w32tm /resync")
+                elif response.status_code == 404:
+                    logger.error("⚠️ 404 NOT FOUND - Applicant ID does not exist or expired")
+                    logger.error("   Ensure applicant was created with /liveness/start")
+
             if response.status_code in [200, 201]:
                 image_id = response.headers.get('X-Image-Id', '')
-                logger.info(f"Liveness selfie added: {image_id}")
+                if not image_id and response.headers.get('Content-Type', '').startswith('application/json'):
+                    response_data = response.json()
+                    image_id = response_data.get('id', '')
+                
+                logger.info(f"✅ Liveness selfie uploaded successfully: {image_id}")
+                logger.info("   Sumsub will now perform active liveness verification (advanced face analysis)")
+                logger.info("   Result will be available via webhook or GET /applicants/{id}/status")
+                
                 return {
                     "success": True,
                     "image_id": image_id,
                     "is_live": True,
-                    "confidence": 0.95
+                    "confidence": 0.95,
+                    "message": "Liveness selfie submitted. Advanced liveness check in progress..."
                 }
             else:
-                logger.error(f"Failed to add liveness selfie: {response.text}")
-                return {"success": False, "error": response.text, "is_live": False}
+                error_msg = f"Sumsub API Error: Status {response.status_code}"
+                try:
+                    error_data = response.json()
+                    if 'description' in error_data:
+                        error_msg += f" - {error_data['description']}"
+                    if 'errorCode' in error_data:
+                        error_msg += f" (Code: {error_data['errorCode']})"
+                except:
+                    error_msg += f" - {response.text}"
+                
+                logger.error(f"❌ Failed to upload liveness selfie: {error_msg}")
+                return {
+                    "success": False, 
+                    "error": error_msg, 
+                    "is_live": False, 
+                    "status_code": response.status_code
+                }
         except Exception as e:
-            logger.error(f"Exception in add_liveness_selfie: {str(e)}")
-            return {"success": False, "error": str(e), "is_live": False}
+            error_msg = f"Exception in add_liveness_selfie: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return {"success": False, "error": error_msg, "is_live": False}
+    
+    async def get_applicant_status(self, applicant_id: str) -> Dict[str, Any]:
+        """
+        Get applicant status including advanced face liveness verification result
+        Returns face liveness check status (approved/rejected/pending)
+        """
+        try:
+            path = f'/resources/applicants/{applicant_id}'
+            headers = self._sign_request('GET', path)
+            
+            response = requests.get(
+                f"{self.base_url}{path}",
+                headers=headers,
+                timeout=self.timeout
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Extract reviews including face liveness
+                reviews = data.get('reviews', [])
+                liveness_review = None
+                for review in reviews:
+                    if review.get('reviewType') == 'FACE_LIVELINESS':
+                        liveness_review = review
+                        break
+                
+                logger.info(f"✅ Applicant status retrieved")
+                logger.info(f"   Applicant ID: {applicant_id}")
+                logger.info(f"   Face liveness status: {liveness_review.get('reviewStatus') if liveness_review else 'pending'}")
+                
+                return {
+                    "success": True,
+                    "applicant_id": applicant_id,
+                    "status": data.get('status'),
+                    "reviews": reviews,
+                    "liveness_review": liveness_review,
+                    "message": "Applicant status retrieved successfully"
+                }
+            else:
+                logger.error(f"Failed to get applicant status: {response.status_code} - {response.text}")
+                return {
+                    "success": False,
+                    "error": f"Sumsub API Error: Status {response.status_code}",
+                    "status_code": response.status_code
+                }
+        except Exception as e:
+            logger.error(f"Exception in get_applicant_status: {str(e)}")
+            return {"success": False, "error": str(e)}
     
     async def complete_liveness_verification(
         self, 

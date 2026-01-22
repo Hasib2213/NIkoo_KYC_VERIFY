@@ -89,19 +89,19 @@ Business logic layer:
 ### 5. API Routers
 
 #### Liveness Router (routers/liveness.py)
-- `POST /api/v1/liveness/start` - BIO-008: Start liveness detection
-- `POST /api/v1/liveness/check` - BIO-009: Process liveness checks
-- `POST /api/v1/liveness/complete` - BIO-010: Complete enrollment
+- `POST /api/v1/liveness/start` -  Start liveness detection
+- `POST /api/v1/liveness/check` -  Process liveness checks
+- `POST /api/v1/liveness/complete` -  Complete enrollment
 
 #### KYC Router (routers/kyc.py)
-- `POST /api/v1/liveness/start` - BIO-008: Start Face Liveness
-- `POST /api/v1/liveness/check` - BIO-009: Process Face Liveness
-- `POST /api/v1/liveness/complete` - BIO-010: Complete Liveness
-- `POST /api/v1/kyc/start` - BIO-011: Start KYC Verification
-- `POST /api/v1/kyc/scan-document` - BIO-012: Document Scanning
-- `POST /api/v1/kyc/verify-selfie` - BIO-013: Selfie Verification
-- `POST /api/v1/kyc/check-status` - BIO-014: Check verification status
-- `POST /api/v1/kyc/complete` - BIO-015: Complete KYC verification
+- `POST /api/v1/liveness/start` - Start Face Liveness
+- `POST /api/v1/liveness/check` -  Process Face Liveness
+- `POST /api/v1/liveness/complete` -  Complete Liveness
+- `POST /api/v1/kyc/start` -  Start KYC Verification
+- `POST /api/v1/kyc/scan-document` -  Document Scanning
+- `POST /api/v1/kyc/verify-selfie` -  Selfie Verification
+- `POST /api/v1/kyc/check-status` -  Check verification status
+- `POST /api/v1/kyc/complete` -  Complete KYC verification
 
 ### 6. Utilities
 

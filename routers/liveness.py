@@ -84,15 +84,29 @@ async def process_liveness_check(
     """
     try:
         service = VerificationService()
-        result = await service.process_liveness_check(
+        # Align router call with service implementation name
+        result = await service.process_liveness_selfie(
             request.session_id,
             request.image_base64
         )
         
         if not result.get("success"):
+            error_detail = result.get("error", "Liveness check failed")
+            # 404 from our DB lookup
+            if error_detail == "Session not found":
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Session not found. Call /api/v1/liveness/start and use the returned session_id."
+                )
+            # 404 bubbled from Sumsub (invalid applicant)
+            if result.get("status_code") == 404 or "Status 404" in error_detail:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Applicant not found at Sumsub. Use the exact session_id returned by /liveness/start in this environment."
+                )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=result.get("error", "Liveness check failed")
+                detail=error_detail
             )
         
         return ProcessLivenessResponse(
@@ -123,10 +137,10 @@ async def complete_liveness_enrollment(
     """
     try:
         service = VerificationService()
-        result = await service.complete_liveness_verification(
+        # Align router call with service implementation signature
+        result = await service.complete_liveness_enrollment(
             request.session_id,
-            request.user_id,
-            request.is_live
+            request.user_id
         )
         
         if not result.get("success"):
@@ -165,4 +179,35 @@ async def get_liveness_status(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get liveness status"
+        )
+
+# Check Advanced Liveness Result
+@router.get("/result/{session_id}")
+async def check_liveness_result(
+    session_id: str,
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    BIO-009: Check advanced face liveness verification result
+    Polls Sumsub for active liveness check status (look left, blink, look right)
+    Status: approved/rejected/pending
+    """
+    try:
+        service = VerificationService()
+        result = await service.check_liveness_status(session_id)
+        
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=result.get("error", "Failed to check liveness result")
+            )
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Check liveness result error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to check liveness result"
         )

@@ -90,9 +90,14 @@ class VerificationService:
                         "selfie_added": True,
                         "is_live": result.get("is_live"),
                         "confidence": result.get("confidence"),
+                        "image_id": result.get("image_id"),
+                        "status": "submitted_for_review",
                         "updated_at": datetime.utcnow()
                     }}
                 )
+                logger.info(f"Liveness selfie submitted. Status: {result.get('message', 'In progress')}")
+            else:
+                logger.error(f"Liveness selfie upload failed: {result.get('error', 'Unknown error')}")
             
             return result
         except Exception as e:
@@ -137,6 +142,59 @@ class VerificationService:
             return result
         except Exception as e:
             logger.error(f"Complete liveness error: {str(e)}")
+            raise
+    
+    async def check_liveness_status(self, session_id: str) -> dict:
+        """
+        Check advanced liveness verification status from Sumsub
+        Retrieves face liveness analysis results (advanced/active liveness)
+        """
+        try:
+            session = await self.liveness_sessions.find_one({"session_id": session_id})
+            if not session:
+                return {"success": False, "error": "Session not found"}
+            
+            applicant_id = session["session_id"]
+            
+            # Get applicant status from Sumsub (includes face liveness result)
+            result = await self.sumsub.get_applicant_status(applicant_id)
+            
+            if result.get("success"):
+                status_data = result.get("status", {})
+                
+                # Extract face liveness check result
+                reviews = result.get("reviews", [])
+                liveness_result = None
+                for review in reviews:
+                    if review.get("reviewType") == "FACE_LIVELINESS":
+                        liveness_result = review
+                        break
+                
+                review_status = liveness_result.get("reviewStatus") if liveness_result else "pending"
+                
+                # Update session with latest result
+                await self.liveness_sessions.update_one(
+                    {"session_id": session_id},
+                    {"$set": {
+                        "review_status": review_status,
+                        "liveness_result": liveness_result,
+                        "is_live": review_status == "approved",
+                        "updated_at": datetime.utcnow()
+                    }}
+                )
+                
+                return {
+                    "success": True,
+                    "session_id": session_id,
+                    "status": review_status,
+                    "is_live": review_status == "approved",
+                    "liveness_result": liveness_result,
+                    "message": f"Face liveness check: {review_status}"
+                }
+            
+            return result
+        except Exception as e:
+            logger.error(f"Check liveness status error: {str(e)}")
             raise
     
     # ==================== KYC FLOW (BIO-011 to BIO-015) ====================
@@ -417,6 +475,7 @@ class VerificationService:
                 "liveness": {
                     "status": "completed" if liveness_session and liveness_session.get("status") == "completed" else "pending",
                     "is_live": liveness_session.get("is_live") if liveness_session else None,
+                    "session_id": liveness_session.get("session_id") if liveness_session else None,
                     "completed_at": liveness_session.get("updated_at") if liveness_session else None,
                     "message": "Liveness Enrolled Successfully" if liveness_session and liveness_session.get("status") == "completed" else None
                 },
