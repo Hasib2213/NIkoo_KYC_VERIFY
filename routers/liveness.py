@@ -1,10 +1,11 @@
 # app/routers/liveness.py
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import Optional
 from services.verification_service import VerificationService
 from utils.auth import verify_api_key
 import logging
+import base64
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/liveness", tags=["Face Liveness Detection"])
@@ -21,7 +22,7 @@ class StartLivenessResponse(BaseModel):
 
 class ProcessLivenessRequest(BaseModel):
     session_id: str
-    image_base64: str
+    image_file: UploadFile  # Changed to file upload
     check_type: str = "orientation"  # orientation, blink, etc
 
 class ProcessLivenessResponse(BaseModel):
@@ -75,7 +76,9 @@ async def start_liveness_detection(
 # BIO-009: Process Face Liveness Check
 @router.post("/check", response_model=ProcessLivenessResponse)
 async def process_liveness_check(
-    request: ProcessLivenessRequest,
+    session_id: str = Form(...),
+    image_file: UploadFile = File(...),
+    check_type: str = Form("orientation"),
     api_key: str = Depends(verify_api_key)
 ):
     """
@@ -83,11 +86,15 @@ async def process_liveness_check(
     Supports: Look left, Blink, Look right
     """
     try:
+        # Read the uploaded file and encode to base64
+        image_bytes = await image_file.read()
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        
         service = VerificationService()
         # Align router call with service implementation name
         result = await service.process_liveness_selfie(
-            request.session_id,
-            request.image_base64
+            session_id,
+            image_base64
         )
         
         if not result.get("success"):

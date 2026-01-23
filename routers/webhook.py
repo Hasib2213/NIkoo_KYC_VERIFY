@@ -147,6 +147,7 @@ async def sumsub_webhook(request: Request):
             }
         
         logger.info(f"Webhook processed successfully for {external_user_id}")
+      
         return {
             "status": "success",
             "message": "Webhook processed",
